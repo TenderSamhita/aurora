@@ -1,0 +1,3 @@
+/* Deprecated: template styles removed for production UX.
+   AURORA uses globals.css design tokens exclusively.
+   No gradients, no glassmorphism, no rounded cards. */
