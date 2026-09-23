@@ -1,0 +1,4 @@
+# Root requirements - proxy to backend for Render single-service deploys
+# Render runs `pip install -r requirements.txt` at repo root by default.
+# This file ensures that works even if Root Directory is not set to `backend`.
+-r backend/requirements.txt

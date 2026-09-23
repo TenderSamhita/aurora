@@ -1,0 +1,40 @@
+# Render Blueprint - AURORA Antarctic Digital Twin
+# Deploys backend (FastAPI) and frontend (Next.js) as separate web services
+# Docs: https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: aurora-backend
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: PYTHONPATH
+        value: .
+      - key: PORT
+        value: 10000
+    # If you need CORS to allow your frontend, it is already set to localhost:3000
+    # Add your frontend URL here after it is deployed:
+    # - key: FRONTEND_URL
+    #   value: https://aurora-frontend.onrender.com
+
+  - type: web
+    name: aurora-frontend
+    runtime: node
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 20.11.0
+      - key: NEXT_PUBLIC_API_URL
+        # Will be auto-filled after backend is live - update to your backend URL:
+        value: https://aurora-backend.onrender.com/api
+      - key: NEXT_PUBLIC_WS_URL
+        value: wss://aurora-backend.onrender.com/api/ws
+
+# Optional: Cron or background worker for simulator tick (not needed - tick is on WS)
