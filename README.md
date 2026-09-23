@@ -22,51 +22,91 @@ AURORA provides a **live digital twin** of Maitri (Schirmacher Oasis, 70.77°S) 
 
 ## 2. Architecture
 
+### 2.1 System Overview
+
+```
+┌─────────────────────────────────┐      ┌─────────────────────────────────┐
+│  EDGE — Maitri / Bharati        │      │  HQ CLOUD — Gateway             │
+│  (Antarctic Station)            │      │  (Last Synced)                  │
+│                                 │      │                                 │
+│  SimulatorEngine ── tick 5s ──► Edge State (always live) ────┐         │
+│      │ physics: thermal→power→fuel→risk                        │         │
+│      │                                                        │         │
+│      └─ is_blackout? ──► SQLite (aurora_telemetry.db)         │         │
+│                         telemetry_buffer + scenario_log        │         │
+│                                │                               │         │
+│                                │ restoration                   │ online  │
+│                                ▼                               ▼         │
+│                         HQ State ◄─────────────────────────────┘         │
+│                         (last synced, stale during blackout)             │
+│                                │                                         │
+│                         Sync Status: ONLINE / DEGRADED / OFFLINE / SYNCING│
+└─────────────────────────────────┴─────────────────────────────────────────┘
+                                   │
+                    ┌──────────────┼──────────────┐
+                    ▼              ▼              ▼
+            REST /api/stations  /state  /edge/state  /sync/status
+            WebSocket /api/ws/{id}  TelemetryPacket {is_buffered, source}
+                    │              │
+                    └──────┬───────┘
+                           ▼
+                 Next.js 16 Frontend :3000
+            TopBar (LINK/VSAT/LIVE/UTC) + Dashboard Grid
+            Environment / Power / Logistics / Risk / Alerts / Comms
+            Digital Twin SVG + Parameter Cascade + Scenario Engine (6)
+            CommsPanel [HQ CLOUD vs EDGE + SQLite queue]
+                           │
+                           └─ POST /scenario /environment ──► EDGE
+```
+
+### 2.2 Mermaid (GitHub Rendered)
+
 ```mermaid
 flowchart TB
-    subgraph EDGE["EDGE — Antarctic Station (Maitri/Bharati)"]
-        SIM[SimulatorEngine<br/>physics tick every 5s]
-        DB[(SQLite<br/>aurora_telemetry.db<br/>telemetry_buffer + scenario_log)]
-        SIM -->|tick: thermal→power→fuel→risk| EDGE_STATE[Edge State<br/>always live]
-        EDGE_STATE -->|is_blackout? buffer| DB
+    subgraph EDGE [EDGE - Maitri Bharati]
+        SIM[SimulatorEngine tick 5s]
+        EDGE_STATE[Edge State live]
+        BUF[(SQLite telemetry_buffer)]
+        SIM --> EDGE_STATE
+        EDGE_STATE --> BUF
     end
-
-    subgraph HQ["HQ CLOUD — Gateway"]
-        HQ_STATE[HQ State<br/>last synced]
-        SYNC[Sync Status<br/>link: ONLINE/DEGRADED/OFFLINE/SYNCING]
-        HQ_STATE <--> SYNC
+    subgraph HQ [HQ CLOUD Gateway]
+        HQ_STATE[HQ State last synced]
+        SYNC[Sync Status]
     end
-
-    EDGE_STATE -.->|online: copy| HQ_STATE
-    DB -->|restoration: replay is_buffered| HQ_STATE
-
-    subgraph API["FastAPI 8000"]
-        REST[REST /api/stations<br/>/state /edge/state /sync/status]
-        WS[WebSocket /api/ws/{id}<br/>TelemeteryPacket]
+    EDGE_STATE -.->|online copy| HQ_STATE
+    BUF -->|replay is_buffered| HQ_STATE
+    subgraph API [FastAPI 8000]
+        REST[REST API]
+        WS[WebSocket]
     end
-
     HQ_STATE --> REST
     HQ_STATE --> WS
     EDGE_STATE --> REST
-
-    subgraph FE["Next.js 16 Frontend 3000"]
-        TOP[TopBar<br/>LINK + VSAT + LIVE + UTC]
-        DASH[Dashboard Grid<br/>Environment/Power/Logistics/Risk/Alerts/Comms]
-        TWIN[Digital Twin Schematic<br/>2D SVG]
-        SCEN[Scenario Engine<br/>6 stress tests]
-        COMMS[CommsPanel<br/>HQ vs EDGE + SQLite queue]
+    subgraph FE [Next.js Frontend 3000]
+        UI[Dashboard]
     end
-
-    WS -->|HQ live or replay| FE
-    REST --> FE
-    FE -->|POST /scenario /environment| EDGE
+    WS --> UI
+    REST --> UI
+    UI --> EDGE
 ```
 
-**Data flow (normal):** `Simulator tick (physics) → Edge State → (link ONLINE) → HQ copy → REST + WebSocket → Frontend (LIVE)`
+### 2.3 Data Flows
 
-**Data flow (blackout):** `Edge tick → SQLite buffer (timestamp, station_id, sequence, compact JSON) → HQ frozen → Frontend shows STALE, LINK: OFFLINE, queued pkts`
+| Mode | Flow |
+|---|---|
+| **Normal** | `tick(physics) -> Edge State -> link ONLINE -> HQ copy -> REST + WS -> Frontend LIVE` |
+| **Blackout** | `Edge tick -> SQLite buffer (timestamp, station_id, sequence, compact JSON) -> HQ frozen -> Frontend STALE, LINK OFFLINE, queued` |
+| **Restoration** | `clear satcom_blackout -> get_unsynced ORDER BY sequence -> broadcast is_buffered=True replay (50ms) -> mark_synced -> HQ=EDGE -> SYNC COMPLETE (N, duration, timestamp) -> LINK ONLINE` |
 
-**Data flow (restoration):** `Operator clears satcom_blackout → get_unsynced_packets ORDER BY sequence → broadcast is_buffered=True source=replay (50ms spacing) → mark_synced → HQ = EDGE → SYNC COMPLETE (replayed N, duration, latest timestamp) → LINK: ONLINE`
+| Component | Path | Description |
+|---|---|---|
+| **SimulatorEngine** | `backend/app/simulator/__init__.py` | `_states` (EDGE), `_hq_states` (HQ), `_baseline`, `_sequence`, `_env_overrides`, `_sync_meta` |
+| **SQLite** | `aurora_telemetry.db` | `telemetry_buffer(packet_id, timestamp, sequence, payload compact, synced)` |
+| **REST** | `backend/app/api/router.py` | `/stations, /state (HQ), /edge/state, /sync/status, POST /environment, POST /scenario` |
+| **WS** | `backend/app/api/websocket.py` | `ConnectionManager` per-station, `tick_loop` 5s, replay on sync |
+| **Frontend** | `frontend/src/lib/websocket.ts` | `useStationSocket` + 3s poll `sync/status` + `edge/state`, `LINK` derivation |
+| **UI** | `TopBar, CommsPanel` | `HQ vs EDGE` tables, staleness, queued pkts, `SYNCING` pulse |
 
 ---
 
